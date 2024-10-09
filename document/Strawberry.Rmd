@@ -1,0 +1,274 @@
+---
+title: "Strawberry"
+author: "Yibing Wang"
+date: "2024-10-02"
+output:
+  html_document: default
+  pdf_document: default
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r}
+#devtools::install_github("UrbanInstitute/urbnmapr")
+library(dplyr)
+library(tidyr)
+library(stringr)
+library(ggplot2)
+library(sf)
+library(mapview)
+library(urbnmapr)
+```
+
+```{r}
+strawberry <- read.csv("strawberries25_v3.csv", header = TRUE)
+head(strawberry)
+```
+
+## Data Cleaning
+```{r}
+# To clean the data set, I need to identify and remove any column that has the same value for every row.
+# For example, the column "watershed_code" has the value "0" in all rows. We can remove those columns.
+drop_col <- function(df) {
+  df %>% select_if(~ length(unique(.)) > 1)
+}
+strawberry_clean <- drop_col(strawberry)
+head(strawberry_clean)
+```
+
+```{r}
+# Next, I will check the "State" column to make sure there is no missing value.
+state_1 <- strawberry_clean %>%
+  group_by(State) %>%
+  count()
+count(state_1)
+sum(state_1$n) == dim(strawberry_clean)[1]
+# The sum of the total number of rows(State) is equal to the total row number of the dataset(cleaned). There is no missing value in the column "State"
+```
+
+```{r}
+# After checking the State info, I could use one state as an example to to help me understand the structure and content of the dataset before analyzing the entire one.
+state_summary <- strawberry_clean %>%
+  group_by(State) %>% 
+  summarize(count = n()) 
+print(state_summary)
+# As we can see from the output, California is the largest strawberries producer in the U.S.
+```
+
+```{r}
+# Analyzing the California strawberry data. I will filter the dataset base on "California" first, and then split the data by "Census" and "Survey". 
+cali_census <- strawberry_clean %>%
+  filter(State == "CALIFORNIA", Program == "CENSUS") %>%
+  select(Year, `Data.Item`, Value)
+head(cali_census)
+
+cali_survey <- strawberry_clean %>%
+  filter(State == "CALIFORNIA", Program == "SURVEY") %>%
+  select(Year, Period, `Data.Item`, Value)
+head(cali_survey)
+```
+
+
+
+```{r}
+# I've noticed that in the Data.Item column, there are multiple info. 
+# After my first time trying to split the column, some info won't switch to the correct column. I've checked the raw data, I think it might because there are some "-" instead of ",", so I need to standardize it first. 
+process_line <- function(line) {
+  line <- as.character(line)
+  # Replace any kind of dash (–, —, -, etc.) with a common dash (regular hyphen)
+  line <- gsub("[–—-]", "-", line)
+  # Split by "-" to get the main components
+  parts <- unlist(strsplit(line, " - "))
+  fruit <- "Strawberries"
+  
+  # Identify Category, Item, and Metric
+  if (length(parts) == 2) {
+    #separate Item and Metric
+    item_metric <- unlist(strsplit(parts[2], ","))
+     # Remove "STRAWBERRIES" 
+    category <- trimws(gsub("^STRAWBERRIES,? ?", "", parts[1]))
+    
+    #if the category is empty, NA
+    if (category == "") {
+      category <- NA
+    }
+    
+    item <- trimws(ifelse(length(item_metric) > 0, item_metric[1], "N/A"))
+    metric <- trimws(ifelse(length(item_metric) > 1, item_metric[2], "N/A"))
+    
+  } else if (length(parts) == 3) {
+    # If three parts are found, the second part is Category and the third is Item + Metric
+    category <- trimws(gsub("^STRAWBERRIES,? ?", "", parts[2]))
+    if (category == "") {
+      category <- NA
+    }
+    
+    item_metric <- unlist(strsplit(parts[3], ","))
+    item <- trimws(ifelse(length(item_metric) > 0, item_metric[1], "N/A"))
+    metric <- trimws(ifelse(length(item_metric) > 1, item_metric[2], "N/A"))
+    
+  } else {
+    category <- trimws(gsub("^STRAWBERRIES,? ?", "", parts[1]))
+    if (category == "") {
+      category <- NA
+    }
+    
+    item <- "N/A"
+    metric <- "N/A"
+  }
+  return(list(Fruit = fruit, Category = category, Item = item, Metric = metric))
+}
+
+strawberry_clean <- cbind(strawberry_clean, do.call(rbind, lapply(strawberry_clean$Data.Item, function(x) {
+  as.data.frame(process_line(x), stringsAsFactors = FALSE)
+})))
+head(strawberry_clean)
+```
+
+
+```{r}
+# The "domain.Category" column also has multiple info.
+DC_1 <- strawberry_clean %>%
+  group_by(Domain.Category) %>%
+  count()
+count(DC_1)
+```
+
+```{r}
+strawberry_clean <- strawberry_clean %>%
+  separate_wider_delim(cols = `Domain.Category`, delim = ": ",
+                       names = c("use", "details"), 
+                       too_many = "error", too_few = "align_start") %>%
+   mutate(
+    name = str_extract(details, "(?<=\\().*?(?=\\=)"),  
+    code = str_extract(details, "(?<=\\= ).*?(?=\\))") 
+  )
+strawberry_clean$use <- gsub("^CHEMICAL, ", "", strawberry_clean$use)
+head(strawberry_clean)
+```
+
+```{r}
+#for value and cv, there are letters inside, I need to change them to NA.
+strawberry_clean$Value <- as.numeric(as.character(strawberry_clean$Value))
+strawberry_clean$CV.... <- as.numeric(as.character(strawberry_clean$CV....))
+head(strawberry_clean)
+```
+```{r}
+#delate data.item
+strawberry_clean <- strawberry_clean %>%
+  select(-Data.Item)
+head(strawberry_clean)
+
+```
+
+## Data visualizing
+
+```{r}
+counties <- get_urbn_map(map = "states", sf = TRUE)
+strawberry_clean$State.ANSI <- as.character(strawberry_clean$State.ANSI)
+strawberry_clean$State.ANSI <- str_pad(strawberry_clean$State.ANSI, width = 2, pad = "0")
+
+
+strawberry_map <- counties %>%
+  left_join(strawberry_clean, by = c("state_fips" = "State.ANSI"))
+```
+```{r}
+strawberry_count <- strawberry_map %>%
+  group_by(State) %>%
+  summarise(total_value = sum(Value, na.rm = TRUE))
+
+mapview(strawberry_count, zcol = 'total_value')
+```
+
+From the first glance we can notice that California stands out as having the highest total value. And the Pacific Northwest as a whole contribute significant amounts to strawberry production.
+
+```{r}
+# first, I'd like to see the yield difference between each state
+strawberry_clean$Value <- as.numeric(strawberry_clean$Value)
+#filter NA
+strawberry_clean <- strawberry_clean[!is.na(strawberry_clean$Value), ]
+ggplot(strawberry_clean, aes(x = reorder(State, -Value), y = Value)) + 
+  geom_bar(stat = "identity") + 
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+```
+
+
+```{r}
+#I'd like to see the change in yield across different years for all states
+yearly_yield <- aggregate(Value ~ Year, data = strawberry_clean, sum)
+yearly_yield$Year <- as.numeric(yearly_yield$Year)
+
+ggplot(yearly_yield, aes(x = Year, y = Value)) +
+  geom_line() + 
+  geom_point() +
+  labs(title = "Total Yield Change Over the Years", 
+       x = "Year", 
+       y = "Total Yield") +
+  theme_minimal()
+```
+
+```{r}
+#Since California has the largest value, I would like to compare the yield of California and all states
+#filter
+cali_data <- strawberry_clean[strawberry_clean$State == "CALIFORNIA", ]
+cali_data$Year <- as.numeric(cali_data$Year)
+
+cali_data <- strawberry_clean %>%
+  filter(State == "CALIFORNIA") %>%
+  group_by(Year) %>%
+  summarise(Total_Yield = sum(Value, na.rm = TRUE))
+print(cali_data)
+
+ggplot() +
+  geom_line(data = cali_data, aes(x = Year, y = Total_Yield), color = "blue") + 
+  geom_line(data = yearly_yield, aes(x = Year, y = Value), color = "red") + 
+  geom_point(data = cali_data, aes(x = Year, y = Total_Yield), color = "blue") +
+  geom_point(data = yearly_yield, aes(x = Year, y = Value), color = "red") + 
+  labs(title = "California vs All States Yield Comparison", 
+       x = "Year", 
+       y = "Yield Value") +
+  theme_minimal()
+```
+```{r}
+#for 2022
+strawberry_2022 <- strawberry_clean %>%
+  filter(Year == 2022) %>%
+  group_by(State) %>%
+  summarise(Total_Yield = sum(Value, na.rm = TRUE))
+
+ggplot(strawberry_2022, aes(x = reorder(State, -Total_Yield), y = Total_Yield)) + 
+  geom_bar(stat = "identity", fill = "skyblue") + 
+  labs(title = "Total Yield by State in 2022", 
+       x = "State", 
+       y = "Total Yield") +
+  theme_minimal()+
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+```
+I plotted the total yield per year and, since California is the largest producer, I compared the trend between California and the total yield across all states. However, I noticed that in 2022, the total yield was much larger than California's yield. To investigate further, I created a chart for each state's yield and found that although California is still the largest producer, its yield did not significantly impact the overall total.This is because the yield of other states, such as Pennsylvania and New York is increased a lot.
+
+```{r}
+#How the strawberries are grown
+category_yield <- strawberry_clean %>%
+  filter(!is.na(use) & !is.na(Value)) %>%
+  group_by(use) %>%
+  summarise(Total_Yield = sum(Value, na.rm = TRUE))
+
+ggplot(category_yield, aes(x = reorder(use, Total_Yield), y = Total_Yield)) +
+  geom_bar(stat = "identity", fill = "lightgreen") +
+  labs(title = "Total Yield by Use Category", x = "Use Category", y = "Total Yield") +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+```
+by comparing the data we have, "Organic" and "Area Grown" is the most popular way of growing strawberries.
+
+
+```{r}
+#write.csv(strawberry_clean, "strawberry_clean.csv", row.names = FALSE)
+```
+
+
+
+
+
